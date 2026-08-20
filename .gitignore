@@ -1,0 +1,15 @@
+# Environment & Secret Variables
+.env
+fb_state.json
+sent_posts.json
+
+# Virtual Environment
+venv/
+env/
+ENV/
+
+# Python Cache & IDE Settings
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
