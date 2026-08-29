@@ -15,18 +15,14 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
 # ------------------------------------------------------------------
-# 📌 BISA INPUT BANYAK GRUP DI SINI (LIST GRUP TARGET)
-# Kamu bisa isi via .env (dipisah koma) atau isi manual di dalam list ini
+# 📌 LIST GRUP TARGET
 # ------------------------------------------------------------------
 ENV_GROUPS = os.getenv("GROUP_URLS")
 if ENV_GROUPS:
     TARGET_GROUPS = [g.strip() for g in ENV_GROUPS.split(",") if g.strip()]
 else:
-    # JIKA TIDAK PAKAI .ENV, TULIS DAFTAR LINK GRUP DI SINI:
     TARGET_GROUPS = [
         "https://www.facebook.com/groups/646266199809882",
-        # "https://www.facebook.com/groups/LOKASI_GRUP_KEDUA",
-        # "https://www.facebook.com/groups/LOKASI_GRUP_KETIGA",
     ]
 
 HISTORY_FILE = "sent_posts.json"
@@ -34,19 +30,36 @@ HISTORY_FILE = "sent_posts.json"
 # Inisialisasi Gemini Client
 client = genai.Client(api_key=GEMINI_API_KEY)
 
+# Kata kunci untuk pra-filter sebelum memanggil API (Menghemat kuota Gemini)
+PROPERTY_KEYWORDS = [
+    "rumah", "tanah", "ruko", "dijual", "jual", "bu", "butuh uang", "cepat", 
+    "kepepet", "shm", "ajb", "over kredit", "take over", "nego", "miliar", 
+    "milyar", "juta", "jt", "kavling", "lt", "lb", "luas"
+]
+
 def load_history():
     if os.path.exists(HISTORY_FILE):
-        with open(HISTORY_FILE, "r") as f:
-            return set(json.load(f))
+        try:
+            with open(HISTORY_FILE, "r") as f:
+                return set(json.load(f))
+        except Exception:
+            return set()
     return set()
 
 def save_history(history):
     with open(HISTORY_FILE, "w") as f:
         json.dump(list(history), f)
 
+def is_potential_property_text(text):
+    """
+    Pra-filter lokal: Hanya kirim ke Gemini jika ada indikasi postingan properti.
+    """
+    text_lower = text.lower()
+    return any(keyword in text_lower for keyword in PROPERTY_KEYWORDS)
+
 def analyze_post_with_gemini(post_text):
     """
-    Mengirim teks postingan ke Gemini AI dengan instruksi FILTER KETAT.
+    Mengirim teks ke Gemini dengan proteksi auto-retry jika terkena Rate Limit 429.
     """
     prompt = f"""
     Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem berpengalaman.
@@ -62,39 +75,44 @@ def analyze_post_with_gemini(post_text):
 
     Tolong jawab HANYA dalam format JSON persis seperti ini:
     {{
-      "is_property": true/false,
-      "score": (angka 1 sampai 10, hanya berikan >= 7 untuk REAL HIDDEN GEM),
-      "jenis": "Rumah" / "Tanah" / "Ruko" / "Lainnya",
+      "is_property": true,
+      "score": 8,
+      "jenis": "Rumah",
       "lokasi": "Nama lokasi/daerah jika ada, atau Unknown",
       "harga": "Harga jika ada, atau Tidak dicantumkan",
       "alasan_menarik": "Penjelasan mendalam & persuasif kenapa properti ini layak disikat investor/buyer (maksimal 3 kalimat)"
     }}
-    Catatan: Jangan tambahkan teks penjelasan di luar JSON.
+    Catatan: Jangan tambahkan teks penjelasan di luar JSON (tanpa markdown fences).
     """
 
-    try:
-        response = client.models.generate_content(
-            model='gemini-3.5-flash',
-            contents=prompt
-        )
-        clean_json = response.text.strip().replace("```json", "").replace("```", "")
-        return json.loads(clean_json)
-    except Exception as e:
-        print(f"⚠️ Error analisis Gemini: {e}")
-        return None
+    for attempt in range(3):
+        try:
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt
+            )
+            raw_text = response.text.strip()
+            clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+            return json.loads(clean_json)
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
+                print(f"⏳ Rate limit Gemini tercapai. Menunggu jeda 30 detik (Percobaan {attempt + 1}/3)...")
+                time.sleep(30)
+            else:
+                print(f"⚠️ Error analisis Gemini: {e}")
+                break
+    return None
 
 def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=None):
-    """
-    Mengirimkan notifikasi Telegram dengan 2 Link: Link Postingan Spesifik & Link Grup Terkait.
-    """
     caption_message = (
-        f"💎 **HIDDEN GEM PROPERTI DITEMUKAN!** 💎\n\n"
-        f"⭐ **Skor Potensi:** `{ai_data.get('score')}/10`\n"
-        f"🏠 **Jenis:** {ai_data.get('jenis')}\n"
-        f"📍 **Lokasi:** {ai_data.get('lokasi')}\n"
-        f"💰 **Harga:** {ai_data.get('harga')}\n\n"
-        f"🧠 **Analisis Investor (AI):**\n_{ai_data.get('alasan_menarik')}_\n\n"
-        f"📝 **Postingan Asli:**\n{raw_text[:300]}...\n\n"
+        f"💎 *HIDDEN GEM PROPERTI DITEMUKAN!* 💎\n\n"
+        f"⭐ *Skor Potensi:* `{ai_data.get('score')}/10`\n"
+        f"🏠 *Jenis:* {ai_data.get('jenis', 'Unknown')}\n"
+        f"📍 *Lokasi:* {ai_data.get('lokasi', 'Unknown')}\n"
+        f"💰 *Harga:* {ai_data.get('harga', 'Unknown')}\n\n"
+        f"🧠 *Analisis Investor (AI):*\n_{ai_data.get('alasan_menarik', '-')}_\n\n"
+        f"📝 *Postingan Asli:*\n{raw_text[:280]}...\n\n"
         f"🔗 [Lihat Postingan Spesifik]({post_url})\n"
         f"🌐 [Buka Grup Facebook]({group_url})"
     )
@@ -117,7 +135,7 @@ def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=Non
         }
     
     try:
-        res = requests.post(url, json=payload)
+        res = requests.post(url, json=payload, timeout=15)
         if photo_url and res.status_code != 200:
             send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=None)
     except Exception as e:
@@ -129,18 +147,29 @@ def run_property_bot():
     
     try:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=False)
-            context = browser.new_context(storage_state="fb_state.json")
+            browser = p.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-setuid-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu"
+                ]
+            )
+            context = browser.new_context(
+                storage_state="fb_state.json",
+                user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            )
             page = context.new_page()
 
-            # 🔄 LOOPING KE SETIAP GRUP YANG ADA DI TARGET_GROUPS
             for idx, current_group_url in enumerate(TARGET_GROUPS, 1):
                 print(f"🔍 [{idx}/{len(TARGET_GROUPS)}] Mengakses Grup: {current_group_url}")
                 
                 try:
-                    page.goto(current_group_url)
-                    time.sleep(5)
+                    page.goto(current_group_url, timeout=90000)
+                    time.sleep(6)
                     
+                    # Scroll feed untuk memuat postingan terbaru
                     for _ in range(3):
                         page.mouse.wheel(0, 1500)
                         time.sleep(3)
@@ -159,7 +188,7 @@ def run_property_bot():
                             ]
                             text_content = "\n".join(cleaned_lines)
                             
-                            if len(text_content) < 40:
+                            if len(text_content) < 40 or not is_potential_property_text(text_content):
                                 continue
                             
                             link_el = post_el.query_selector('a[href*="/groups/"][href*="/posts/"], a[href*="permalink"]')
@@ -183,7 +212,7 @@ def run_property_bot():
                         except Exception:
                             continue
 
-                    # MENGANALISIS POSTINGAN DARI GRUP SAAT INI
+                    # Proses Analisis Postingan Terpilih
                     new_alerts_count = 0
                     for item in extracted_posts:
                         line_clean = item["text"]
@@ -195,15 +224,15 @@ def run_property_bot():
                         ai_result = analyze_post_with_gemini(line_clean)
                         if ai_result and ai_result.get("is_property"):
                             if ai_result.get("score", 0) >= 7:
-                                print(f"🎯 HIDDEN GEM FOUND (Skor {ai_result.get('score')}): Kirim ke Telegram...")
+                                print(f"🎯 HIDDEN GEM FOUND (Skor {ai_result.get('score')}): Mengirim ke Telegram...")
                                 send_telegram_ai_alert(ai_result, line_clean, item["url"], item["group_url"], item["photo"])
                                 new_alerts_count += 1
                         
                         sent_history.add(post_id)
-                        time.sleep(12)  # Delay Rate Limit Gemini
+                        save_history(sent_history)
+                        time.sleep(5)  # Jeda aman per postingan agar tidak melanggar RPM
                     
-                    save_history(sent_history)
-                    print(f"✅ Selesai mengecek Grup {idx}. Found: {new_alerts_count} Hidden Gem(s).")
+                    print(f"✅ Selesai mengecek Grup {idx}. Ditemukan: {new_alerts_count} Hidden Gem.")
                     
                 except Exception as e:
                     print(f"⚠️ Gagal mengecek grup {current_group_url}: {e}")
@@ -215,9 +244,19 @@ def run_property_bot():
     except Exception as e:
         print(f"❌ Terjadi kesalahan utama pada scraping: {e}")
 
+def safe_job():
+    """Wrapper pelindung agar jadwal rutin tidak terputus bila terjadi error."""
+    try:
+        run_property_bot()
+    except Exception as e:
+        print(f"⚠️ Kesalahan saat mengeksekusi siklus rutin: {e}")
+
 if __name__ == "__main__":
-    run_property_bot()
-    schedule.every(1).hours.do(run_property_bot)
+    # Eksekusi langsung 1x saat pertama kali dijalankan
+    safe_job()
+    
+    # Jadwalkan per 1 jam
+    schedule.every(1).hours.do(safe_job)
     
     print(f"\n🤖 BOT HIDDEN GEM PROPERTI MULTI-GROUP ({len(TARGET_GROUPS)} GRUP) AKTIF 24/7...")
     while True:
