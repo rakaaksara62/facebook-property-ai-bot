@@ -88,7 +88,7 @@ def analyze_post_with_gemini(post_text):
     for attempt in range(3):
         try:
             response = client.models.generate_content(
-                model='gemini-2.5-flash',
+                model='gemini-3.6-flash',
                 contents=prompt
             )
             raw_text = response.text.strip()
