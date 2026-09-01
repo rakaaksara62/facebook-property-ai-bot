@@ -1,6 +1,7 @@
 import os
 import time
 import json
+import itertools
 import requests
 import schedule
 from dotenv import load_dotenv
@@ -10,31 +11,47 @@ from playwright.sync_api import sync_playwright
 # --- LOAD ENVIRONMENT VARIABLES ---
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
+# --- INISIALISASI GEMINI MULTI-KEY ROTATION ---
+RAW_KEYS = os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", ""))
+API_KEYS = [k.strip() for k in RAW_KEYS.split(",") if k.strip()]
+
+if not API_KEYS:
+    raise ValueError("❌ Tidak ada GEMINI_API_KEY atau GEMINI_API_KEYS yang ditemukan di file .env!")
+
+print(f"🔑 Berhasil memuat {len(API_KEYS)} Gemini API Key untuk rotasi beban.")
+clients = [genai.Client(api_key=key) for key in API_KEYS]
+client_cycle = itertools.cycle(clients)
+
 # ------------------------------------------------------------------
-# 📌 LIST GRUP TARGET
+# 📌 LIST GRUP TARGET JAKARTA BARAT
 # ------------------------------------------------------------------
 ENV_GROUPS = os.getenv("GROUP_URLS")
 if ENV_GROUPS:
     TARGET_GROUPS = [g.strip() for g in ENV_GROUPS.split(",") if g.strip()]
 else:
+    # Default grup target (Bisa disesuaikan via .env)
     TARGET_GROUPS = [
         "https://www.facebook.com/groups/646266199809882",
     ]
 
 HISTORY_FILE = "sent_posts.json"
 
-# Inisialisasi Gemini Client
-client = genai.Client(api_key=GEMINI_API_KEY)
-
-# Kata kunci untuk pra-filter sebelum memanggil API (Menghemat kuota Gemini)
+# Kata kunci umum & lokasi spesifik Jakarta Barat untuk pra-filter lokal (Hemat kuota)
 PROPERTY_KEYWORDS = [
+    # Status & Karakteristik Transaksi Cepat
     "rumah", "tanah", "ruko", "dijual", "jual", "bu", "butuh uang", "cepat", 
-    "kepepet", "shm", "ajb", "over kredit", "take over", "nego", "miliar", 
-    "milyar", "juta", "jt", "kavling", "lt", "lb", "luas"
+    "kepepet", "shm", "hgb", "ajb", "over kredit", "take over", "nego", "miliar", 
+    "milyar", "juta", "jt", "kavling", "lt", "lb", "luas", "hitung tanah",
+    
+    # Wilayah, Kecamatan & Kawasan Strategis Jakarta Barat
+    "jakbar", "jakarta barat", "cengkareng", "kalideres", "kebon jeruk", 
+    "puri", "puri indah", "kembangan", "meruya", "grogol", "petamburan", 
+    "tanjung duren", "palmerah", "tamansari", "tambora", "daan mogot", 
+    "kedoya", "joglo", "bojong indah", "citra garden", "taman palem",
+    "taman ratu", "green garden", "pos pengumben", "intercon"
 ]
 
 def load_history():
@@ -52,42 +69,48 @@ def save_history(history):
 
 def is_potential_property_text(text):
     """
-    Pra-filter lokal: Hanya kirim ke Gemini jika ada indikasi postingan properti.
+    Pra-filter lokal: Hanya kirim ke Gemini jika ada indikasi postingan properti/area Jakbar.
     """
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in PROPERTY_KEYWORDS)
 
 def analyze_post_with_gemini(post_text):
     """
-    Mengirim teks ke Gemini dengan proteksi auto-retry jika terkena Rate Limit 429.
+    Mengirim teks ke Gemini dengan filter tajam khusus target properti Jakarta Barat.
     """
     prompt = f"""
-    Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem berpengalaman.
-    Tugas utamamu adalah mendeteksi HANYA properti yang tergolong HIDDEN GEM / BUTUH UANG / DI BAWAH HARGA PASAR dari postingan grup Facebook.
+    Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem yang berfokus di area JAKARTA BARAT.
+    Tugasmu adalah menganalisis postingan Facebook dan HANYA meloloskan properti yang berstatus HIDDEN GEM / BUTUH UANG (BU) / DI BAWAH HARGA PASAR di wilayah Jakarta Barat dan sekitarnya.
 
     Berikut teks postingannya:
     \"\"\"{post_text}\"\"\"
 
-    ATURAN FILTER SUPER KETAT:
-    1. TOLAK BLA-BLA SALES / DEVELOPER: Jika postingan adalah iklan perumahan subsidi, promo rumah baru kpr developer, brosur sales, rumah indent, atau promo DP 0% dari perumahan baru -> Set "is_property": false ATAU berikan "score": < 5.
-    2. CARI HIDDEN GEM: Hanya berikan "score" 7 sampai 10 jika postingan berasal dari OWNER LANGSUNG / RUMAH SECOND MURAH / TAKE OVER OVER KREDIT KEPEPET / JUAL BU / HARGA DI BAWAH PASAR.
-    3. TULIS ALASAN PEMILIHAN YANG PERSUASIF: Jika memenuhi syarat Hidden Gem, tuliskan alasan pemilihan properti tersebut dengan sangat tajam dan profesional (misal: analisis rasio harga, poin kepepet penjual, keunggulan lokasi/dokumen, dan potensi margin).
+    ATURAN EVALUASI & FILTER:
+    1. VALIDASI LOKASI: Prioritaskan wilayah Jakarta Barat (Cengkareng, Kalideres, Kebon Jeruk, Kembangan, Puri, Meruya, Tanjung Duren, Grogol, Palmerah, Joglo, Daan Mogot, dll). Jika lokasi jelas di luar Jabodetabek/bukan Jakbar, set "is_property": false atau "score": < 5.
+    2. TOLAK IKLAN DEVELOPER/SALES: Tolong tolak iklan rumah baru indent developer, promo KPR komersial brosur, perumahan subsidi luar kota, atau sales agent spam -> Set "is_property": false atau "score": < 5.
+    3. KRITERIA SKOR TINGGI (Skor 7 - 10):
+       - Listing dari OWNER LANGSUNG / Rumah second BU / Butuh Uang Cepat.
+       - Rumah tua hitung tanah (harga tanah di bawah rata-rata pasar area tersebut).
+       - Take over / Over kredit kepepet.
+       - Dokumen legalitas jelas (diutamakan SHM/HGB murni).
+    4. ANALISIS INVESTOR: Tuliskan alasan ringkas namun tajam (analisis harga/NJOP, akses jalan, potensi sewa/flipper, atau alasan kenapa ini peluang bagus bagi investor).
 
-    Tolong jawab HANYA dalam format JSON persis seperti ini:
+    Format output WAJIB HANYA JSON murni (tanpa markdown fences):
     {{
       "is_property": true,
       "score": 8,
       "jenis": "Rumah",
-      "lokasi": "Nama lokasi/daerah jika ada, atau Unknown",
-      "harga": "Harga jika ada, atau Tidak dicantumkan",
-      "alasan_menarik": "Penjelasan mendalam & persuasif kenapa properti ini layak disikat investor/buyer (maksimal 3 kalimat)"
+      "lokasi": "Nama daerah/kecamatan di Jakbar jika ada, atau Unknown",
+      "harga": "Harga nominal properti jika tertera, atau Tidak dicantumkan",
+      "alasan_menarik": "Analisis tajam kenapa unit Jakbar ini layak diambil investor (maksimal 3 kalimat)"
     }}
-    Catatan: Jangan tambahkan teks penjelasan di luar JSON (tanpa markdown fences).
     """
 
-    for attempt in range(3):
+    max_attempts = len(clients) * 2
+    for attempt in range(max_attempts):
+        active_client = next(client_cycle)
         try:
-            response = client.models.generate_content(
+            response = active_client.models.generate_content(
                 model='gemini-3.6-flash',
                 contents=prompt
             )
@@ -97,35 +120,49 @@ def analyze_post_with_gemini(post_text):
         except Exception as e:
             err_msg = str(e)
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                print(f"⏳ Rate limit Gemini tercapai. Menunggu jeda 30 detik (Percobaan {attempt + 1}/3)...")
-                time.sleep(30)
+                print(f"🔄 Key terkena limit 429, berganti ke Key berikutnya (Percobaan {attempt + 1}/{max_attempts})...")
+                time.sleep(2)
             else:
                 print(f"⚠️ Error analisis Gemini: {e}")
-                break
+                time.sleep(1)
     return None
 
 def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=None):
+    clean_raw = raw_text[:280].replace("*", "").replace("_", "").replace("`", "")
+    alasan = str(ai_data.get('alasan_menarik', '-')).replace("*", "").replace("_", "")
+
     caption_message = (
-        f"💎 *HIDDEN GEM PROPERTI DITEMUKAN!* 💎\n\n"
+        f"💎 *HIDDEN GEM JAKARTA BARAT DITEMUKAN!* 💎\n\n"
         f"⭐ *Skor Potensi:* `{ai_data.get('score')}/10`\n"
         f"🏠 *Jenis:* {ai_data.get('jenis', 'Unknown')}\n"
         f"📍 *Lokasi:* {ai_data.get('lokasi', 'Unknown')}\n"
         f"💰 *Harga:* {ai_data.get('harga', 'Unknown')}\n\n"
-        f"🧠 *Analisis Investor (AI):*\n_{ai_data.get('alasan_menarik', '-')}_\n\n"
-        f"📝 *Postingan Asli:*\n{raw_text[:280]}...\n\n"
+        f"🧠 *Analisis Investor (AI):*\n_{alasan}_\n\n"
+        f"📝 *Postingan Asli:*\n{clean_raw}...\n\n"
         f"🔗 [Lihat Postingan Spesifik]({post_url})\n"
         f"🌐 [Buka Grup Facebook]({group_url})"
     )
     
+    # 1. Coba kirim foto jika tersedia
     if photo_url:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
-        payload = {
-            "chat_id": CHAT_ID,
-            "photo": photo_url,
-            "caption": caption_message,
-            "parse_mode": "Markdown"
-        }
-    else:
+        try:
+            url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+            payload = {
+                "chat_id": CHAT_ID,
+                "photo": photo_url,
+                "caption": caption_message,
+                "parse_mode": "Markdown"
+            }
+            res = requests.post(url, json=payload, timeout=15)
+            if res.status_code == 200:
+                return
+            else:
+                print(f"⚠️ Gagal kirim foto ke Telegram ({res.status_code}). Beralih ke pesan teks...")
+        except Exception as e:
+            print(f"⚠️ Exception kirim foto: {e}. Beralih ke pesan teks biasa...")
+
+    # 2. Kirim pesan teks dengan Markdown
+    try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
             "chat_id": CHAT_ID,
@@ -133,16 +170,22 @@ def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=Non
             "parse_mode": "Markdown",
             "disable_web_page_preview": False
         }
-    
-    try:
         res = requests.post(url, json=payload, timeout=15)
-        if photo_url and res.status_code != 200:
-            send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=None)
+        
+        # 3. Fallback jika parsing Markdown gagal
+        if res.status_code != 200:
+            plain_text = caption_message.replace("*", "").replace("_", "").replace("`", "")
+            payload_plain = {
+                "chat_id": CHAT_ID,
+                "text": plain_text,
+                "disable_web_page_preview": False
+            }
+            requests.post(url, json=payload_plain, timeout=15)
     except Exception as e:
-        print(f"❌ Error kirim ke Telegram: {e}")
+        print(f"❌ Error fatal kirim ke Telegram: {e}")
 
 def run_property_bot():
-    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🚀 Memulai Pengecekan Rutin Multi-Grup ({len(TARGET_GROUPS)} Grup Target)...")
+    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🚀 Memulai Pengecekan Rutin Multi-Grup Jakbar ({len(TARGET_GROUPS)} Grup Target)...")
     sent_history = load_history()
     
     try:
@@ -188,6 +231,7 @@ def run_property_bot():
                             ]
                             text_content = "\n".join(cleaned_lines)
                             
+                            # Pra-filter teks & kata kunci Jakbar
                             if len(text_content) < 40 or not is_potential_property_text(text_content):
                                 continue
                             
@@ -230,7 +274,7 @@ def run_property_bot():
                         
                         sent_history.add(post_id)
                         save_history(sent_history)
-                        time.sleep(5)  # Jeda aman per postingan agar tidak melanggar RPM
+                        time.sleep(3)  # Jeda aman per panggilan API
                     
                     print(f"✅ Selesai mengecek Grup {idx}. Ditemukan: {new_alerts_count} Hidden Gem.")
                     
@@ -245,20 +289,17 @@ def run_property_bot():
         print(f"❌ Terjadi kesalahan utama pada scraping: {e}")
 
 def safe_job():
-    """Wrapper pelindung agar jadwal rutin tidak terputus bila terjadi error."""
+    """Wrapper pelindung agar loop schedule tetap berjalan jika ada error."""
     try:
         run_property_bot()
     except Exception as e:
-        print(f"⚠️ Kesalahan saat mengeksekusi siklus rutin: {e}")
+        print(f"⚠️ Kesalahan saat eksekusi rutin: {e}")
 
 if __name__ == "__main__":
-    # Eksekusi langsung 1x saat pertama kali dijalankan
     safe_job()
-    
-    # Jadwalkan per 1 jam
     schedule.every(1).hours.do(safe_job)
     
-    print(f"\n🤖 BOT HIDDEN GEM PROPERTI MULTI-GROUP ({len(TARGET_GROUPS)} GRUP) AKTIF 24/7...")
+    print(f"\n🤖 BOT HIDDEN GEM PROPERTI JAKARTA BARAT ({len(TARGET_GROUPS)} GRUP) AKTIF 24/7...")
     while True:
         schedule.run_pending()
         time.sleep(10)
