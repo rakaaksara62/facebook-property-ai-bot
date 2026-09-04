@@ -1,7 +1,6 @@
 import os
 import time
 import json
-import itertools
 import requests
 import schedule
 from dotenv import load_dotenv
@@ -14,7 +13,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# --- INISIALISASI GEMINI MULTI-KEY ROTATION ---
+# --- INISIALISASI GEMINI MULTI-KEY ROTATION (EXPLICIT INDEX) ---
 RAW_KEYS = os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", ""))
 API_KEYS = [k.strip() for k in RAW_KEYS.split(",") if k.strip()]
 
@@ -23,7 +22,16 @@ if not API_KEYS:
 
 print(f"🔑 Berhasil memuat {len(API_KEYS)} Gemini API Key untuk rotasi beban.")
 clients = [genai.Client(api_key=key) for key in API_KEYS]
-client_cycle = itertools.cycle(clients)
+CURRENT_KEY_INDEX = 0  # Global pointer untuk menjamin rotasi bergantian
+
+def get_next_client():
+    """Mengambil client berikutnya secara berurutan dan memajukan pointer."""
+    global CURRENT_KEY_INDEX
+    idx = CURRENT_KEY_INDEX
+    client = clients[idx]
+    key_num = idx + 1
+    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(clients)
+    return client, key_num
 
 # ------------------------------------------------------------------
 # 📌 LIST GRUP TARGET JAKARTA BARAT
@@ -76,7 +84,8 @@ def is_potential_property_text(text):
 
 def analyze_post_with_gemini(post_text):
     """
-    Mengirim teks ke Gemini dengan filter tajam khusus target properti Jakarta Barat.
+    Mengirim teks ke Gemini dengan rotasi bergantian di setiap postingan,
+    dilengkapi fallback jika key aktif terkena limit 429.
     """
     prompt = f"""
     Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem yang berfokus di area JAKARTA BARAT.
@@ -106,9 +115,11 @@ def analyze_post_with_gemini(post_text):
     }}
     """
 
-    max_attempts = len(clients) * 2
-    for attempt in range(max_attempts):
-        active_client = next(client_cycle)
+    total_keys = len(clients)
+    for attempt in range(total_keys):
+        active_client, key_num = get_next_client()
+        print(f"🤖 Mengirim analisis ke Gemini menggunakan [Key {key_num}/{total_keys}]...")
+
         try:
             response = active_client.models.generate_content(
                 model='gemini-3.6-flash',
@@ -117,14 +128,16 @@ def analyze_post_with_gemini(post_text):
             raw_text = response.text.strip()
             clean_json = raw_text.replace("```json", "").replace("```", "").strip()
             return json.loads(clean_json)
+
         except Exception as e:
             err_msg = str(e)
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                print(f"🔄 Key terkena limit 429, berganti ke Key berikutnya (Percobaan {attempt + 1}/{max_attempts})...")
-                time.sleep(2)
-            else:
-                print(f"⚠️ Error analisis Gemini: {e}")
+                print(f"🔄 [Key {key_num}] limit 429! Mengalihkan ke key berikutnya (Percobaan {attempt + 1}/{total_keys})...")
                 time.sleep(1)
+            else:
+                print(f"⚠️ Error analisis [Key {key_num}]: {e}")
+                time.sleep(1)
+
     return None
 
 def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=None):
