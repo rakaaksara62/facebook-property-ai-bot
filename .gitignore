@@ -13,3 +13,4 @@ __pycache__/
 *.py[cod]
 .vscode/
 .idea/
+api-tester.py
