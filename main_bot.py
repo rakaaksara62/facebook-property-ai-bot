@@ -15,14 +15,14 @@ CHAT_ID = os.getenv("CHAT_ID")
 
 # --- INISIALISASI GEMINI MULTI-KEY ROTATION (EXPLICIT INDEX) ---
 RAW_KEYS = os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", ""))
-API_KEYS = [k.strip() for k in RAW_KEYS.split(",") if k.strip()]
+API_KEYS = [k.strip().strip('"').strip("'") for k in RAW_KEYS.split(",") if k.strip()]
 
 if not API_KEYS:
     raise ValueError("❌ Tidak ada GEMINI_API_KEY atau GEMINI_API_KEYS yang ditemukan di file .env!")
 
 print(f"🔑 Berhasil memuat {len(API_KEYS)} Gemini API Key untuk rotasi beban.")
 clients = [genai.Client(api_key=key) for key in API_KEYS]
-CURRENT_KEY_INDEX = 0  # Global pointer untuk menjamin rotasi bergantian
+CURRENT_KEY_INDEX = 0
 
 def get_next_client():
     """Mengambil client berikutnya secara berurutan dan memajukan pointer."""
@@ -40,21 +40,20 @@ ENV_GROUPS = os.getenv("GROUP_URLS")
 if ENV_GROUPS:
     TARGET_GROUPS = [g.strip() for g in ENV_GROUPS.split(",") if g.strip()]
 else:
-    # Default grup target (Bisa disesuaikan via .env)
     TARGET_GROUPS = [
         "https://www.facebook.com/groups/646266199809882",
     ]
 
 HISTORY_FILE = "sent_posts.json"
 
-# Kata kunci umum & lokasi spesifik Jakarta Barat untuk pra-filter lokal (Hemat kuota)
+# Kata kunci umum & kawasan Jakarta Barat untuk pra-filter lokal (hemat kuota)
 PROPERTY_KEYWORDS = [
-    # Status & Karakteristik Transaksi Cepat
+    # Status transaksi cepat
     "rumah", "tanah", "ruko", "dijual", "jual", "bu", "butuh uang", "cepat", 
     "kepepet", "shm", "hgb", "ajb", "over kredit", "take over", "nego", "miliar", 
     "milyar", "juta", "jt", "kavling", "lt", "lb", "luas", "hitung tanah",
     
-    # Wilayah, Kecamatan & Kawasan Strategis Jakarta Barat
+    # Wilayah / Kawasan Jakarta Barat
     "jakbar", "jakarta barat", "cengkareng", "kalideres", "kebon jeruk", 
     "puri", "puri indah", "kembangan", "meruya", "grogol", "petamburan", 
     "tanjung duren", "palmerah", "tamansari", "tambora", "daan mogot", 
@@ -77,15 +76,14 @@ def save_history(history):
 
 def is_potential_property_text(text):
     """
-    Pra-filter lokal: Hanya kirim ke Gemini jika ada indikasi postingan properti/area Jakbar.
+    Pra-filter lokal: Hanya kirim ke Gemini jika ada kata kunci properti / Jakbar.
     """
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in PROPERTY_KEYWORDS)
 
 def analyze_post_with_gemini(post_text):
     """
-    Mengirim teks ke Gemini dengan rotasi bergantian di setiap postingan,
-    dilengkapi fallback jika key aktif terkena limit 429.
+    Mengirim teks ke Gemini dengan rotasi multi-key dan penanganan 429 / 503.
     """
     prompt = f"""
     Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem yang berfokus di area JAKARTA BARAT.
@@ -131,9 +129,9 @@ def analyze_post_with_gemini(post_text):
 
         except Exception as e:
             err_msg = str(e)
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg:
-                print(f"🔄 [Key {key_num}] limit 429! Mengalihkan ke key berikutnya (Percobaan {attempt + 1}/{total_keys})...")
-                time.sleep(1)
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "503" in err_msg:
+                print(f"🔄 [Key {key_num}] limit 429/503! Menunggu 3 detik lalu alihkan ke key berikutnya...")
+                time.sleep(3)
             else:
                 print(f"⚠️ Error analisis [Key {key_num}]: {e}")
                 time.sleep(1)
@@ -156,7 +154,7 @@ def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=Non
         f"🌐 [Buka Grup Facebook]({group_url})"
     )
     
-    # 1. Coba kirim foto jika tersedia
+    # 1. Kirim foto jika ada
     if photo_url:
         try:
             url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
@@ -170,11 +168,11 @@ def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=Non
             if res.status_code == 200:
                 return
             else:
-                print(f"⚠️ Gagal kirim foto ke Telegram ({res.status_code}). Beralih ke pesan teks...")
+                print(f"⚠️ Gagal kirim foto ke Telegram ({res.status_code}). Beralih ke teks biasa...")
         except Exception as e:
-            print(f"⚠️ Exception kirim foto: {e}. Beralih ke pesan teks biasa...")
+            print(f"⚠️ Exception kirim foto: {e}. Beralih ke teks biasa...")
 
-    # 2. Kirim pesan teks dengan Markdown
+    # 2. Kirim format pesan teks
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
@@ -244,7 +242,10 @@ def run_property_bot():
                             ]
                             text_content = "\n".join(cleaned_lines)
                             
-                            # Pra-filter teks & kata kunci Jakbar
+                            # Pangkas teks maksimal 1.500 karakter untuk membuang komentar/sampah DOM
+                            text_content = text_content[:1500].strip()
+                            
+                            # Pra-filter lokal
                             if len(text_content) < 40 or not is_potential_property_text(text_content):
                                 continue
                             
@@ -287,7 +288,9 @@ def run_property_bot():
                         
                         sent_history.add(post_id)
                         save_history(sent_history)
-                        time.sleep(3)  # Jeda aman per panggilan API
+                        
+                        # Jeda peredam 5 detik agar RPM per key tetap dingin di ~4 RPM
+                        time.sleep(5)
                     
                     print(f"✅ Selesai mengecek Grup {idx}. Ditemukan: {new_alerts_count} Hidden Gem.")
                     
@@ -302,7 +305,7 @@ def run_property_bot():
         print(f"❌ Terjadi kesalahan utama pada scraping: {e}")
 
 def safe_job():
-    """Wrapper pelindung agar loop schedule tetap berjalan jika ada error."""
+    """Wrapper pelindung agar penjadwalan tetap jalan jika terjadi error koneksi."""
     try:
         run_property_bot()
     except Exception as e:
