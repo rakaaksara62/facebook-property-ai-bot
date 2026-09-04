@@ -5,6 +5,7 @@ import requests
 import schedule
 from dotenv import load_dotenv
 from google import genai
+from google.genai import types
 from playwright.sync_api import sync_playwright
 
 # --- LOAD ENVIRONMENT VARIABLES ---
@@ -13,7 +14,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# --- INISIALISASI GEMINI MULTI-KEY ROTATION (EXPLICIT INDEX) ---
+# --- INISIALISASI GEMINI MULTI-KEY ROTATION ---
 RAW_KEYS = os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", ""))
 API_KEYS = [k.strip().strip('"').strip("'") for k in RAW_KEYS.split(",") if k.strip()]
 
@@ -75,43 +76,33 @@ def save_history(history):
         json.dump(list(history), f)
 
 def is_potential_property_text(text):
-    """
-    Pra-filter lokal: Hanya kirim ke Gemini jika ada kata kunci properti / Jakbar.
-    """
+    """Pra-filter lokal sebelum memanggil API Gemini."""
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in PROPERTY_KEYWORDS)
 
 def analyze_post_with_gemini(post_text):
     """
-    Mengirim teks ke Gemini dengan rotasi multi-key dan penanganan 429 / 503.
+    Mengirim teks ke Gemini tanpa AFC, menggunakan response_mime_type JSON murni
+    agar respons stabil dan hemat resource.
     """
-    prompt = f"""
-    Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem yang berfokus di area JAKARTA BARAT.
-    Tugasmu adalah menganalisis postingan Facebook dan HANYA meloloskan properti yang berstatus HIDDEN GEM / BUTUH UANG (BU) / DI BAWAH HARGA PASAR di wilayah Jakarta Barat dan sekitarnya.
+    system_prompt = (
+        "Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem yang berfokus di area JAKARTA BARAT. "
+        "Tugasmu mendeteksi HANYA properti yang tergolong HIDDEN GEM / BUTUH UANG (BU) / DI BAWAH HARGA PASAR di wilayah Jakarta Barat. "
+        "Aturan ketat:\n"
+        "1. Prioritaskan area Jakarta Barat (Cengkareng, Kalideres, Kebon Jeruk, Kembangan, Puri, Meruya, Tanjung Duren, Grogol, Palmerah, Joglo, Daan Mogot).\n"
+        "2. Tolak keras iklan sales/developer perumahan baru, brosur subsidi, atau promo indent (beri score < 5 atau is_property: false).\n"
+        "3. Beri score 7-10 hanya untuk listing owner langsung, rumah second BU kepepet, rumah tua hitung tanah murah, atau over kredit murah.\n"
+        "Output WAJIB berupa objek JSON valid dengan field persis:\n"
+        '{"is_property": bool, "score": int, "jenis": str, "lokasi": str, "harga": str, "alasan_menarik": str}'
+    )
 
-    Berikut teks postingannya:
-    \"\"\"{post_text}\"\"\"
+    user_content = f"Berikut teks postingan Facebook:\n\"\"\"{post_text}\"\"\""
 
-    ATURAN EVALUASI & FILTER:
-    1. VALIDASI LOKASI: Prioritaskan wilayah Jakarta Barat (Cengkareng, Kalideres, Kebon Jeruk, Kembangan, Puri, Meruya, Tanjung Duren, Grogol, Palmerah, Joglo, Daan Mogot, dll). Jika lokasi jelas di luar Jabodetabek/bukan Jakbar, set "is_property": false atau "score": < 5.
-    2. TOLAK IKLAN DEVELOPER/SALES: Tolong tolak iklan rumah baru indent developer, promo KPR komersial brosur, perumahan subsidi luar kota, atau sales agent spam -> Set "is_property": false atau "score": < 5.
-    3. KRITERIA SKOR TINGGI (Skor 7 - 10):
-       - Listing dari OWNER LANGSUNG / Rumah second BU / Butuh Uang Cepat.
-       - Rumah tua hitung tanah (harga tanah di bawah rata-rata pasar area tersebut).
-       - Take over / Over kredit kepepet.
-       - Dokumen legalitas jelas (diutamakan SHM/HGB murni).
-    4. ANALISIS INVESTOR: Tuliskan alasan ringkas namun tajam (analisis harga/NJOP, akses jalan, potensi sewa/flipper, atau alasan kenapa ini peluang bagus bagi investor).
-
-    Format output WAJIB HANYA JSON murni (tanpa markdown fences):
-    {{
-      "is_property": true,
-      "score": 8,
-      "jenis": "Rumah",
-      "lokasi": "Nama daerah/kecamatan di Jakbar jika ada, atau Unknown",
-      "harga": "Harga nominal properti jika tertera, atau Tidak dicantumkan",
-      "alasan_menarik": "Analisis tajam kenapa unit Jakbar ini layak diambil investor (maksimal 3 kalimat)"
-    }}
-    """
+    config = types.GenerateContentConfig(
+        system_instruction=system_prompt,
+        response_mime_type="application/json",
+        temperature=0.2,
+    )
 
     total_keys = len(clients)
     for attempt in range(total_keys):
@@ -121,16 +112,16 @@ def analyze_post_with_gemini(post_text):
         try:
             response = active_client.models.generate_content(
                 model='gemini-3.6-flash',
-                contents=prompt
+                contents=user_content,
+                config=config
             )
             raw_text = response.text.strip()
-            clean_json = raw_text.replace("```json", "").replace("```", "").strip()
-            return json.loads(clean_json)
+            return json.loads(raw_text)
 
         except Exception as e:
             err_msg = str(e)
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "503" in err_msg:
-                print(f"🔄 [Key {key_num}] limit 429/503! Menunggu 3 detik lalu alihkan ke key berikutnya...")
+                print(f"🔄 [Key {key_num}] terkena limit/overload. Menunggu 3 detik lalu alihkan...")
                 time.sleep(3)
             else:
                 print(f"⚠️ Error analisis [Key {key_num}]: {e}")
@@ -172,7 +163,7 @@ def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=Non
         except Exception as e:
             print(f"⚠️ Exception kirim foto: {e}. Beralih ke teks biasa...")
 
-    # 2. Kirim format pesan teks
+    # 2. Kirim pesan teks Markdown
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         payload = {
@@ -183,7 +174,7 @@ def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=Non
         }
         res = requests.post(url, json=payload, timeout=15)
         
-        # 3. Fallback jika parsing Markdown gagal
+        # 3. Fallback jika parsing Markdown bermasalah
         if res.status_code != 200:
             plain_text = caption_message.replace("*", "").replace("_", "").replace("`", "")
             payload_plain = {
@@ -223,7 +214,7 @@ def run_property_bot():
                     page.goto(current_group_url, timeout=90000)
                     time.sleep(6)
                     
-                    # Scroll feed untuk memuat postingan terbaru
+                    # Scroll feed perlahan
                     for _ in range(3):
                         page.mouse.wheel(0, 1500)
                         time.sleep(3)
@@ -242,7 +233,7 @@ def run_property_bot():
                             ]
                             text_content = "\n".join(cleaned_lines)
                             
-                            # Pangkas teks maksimal 1.500 karakter untuk membuang komentar/sampah DOM
+                            # Batasi panjang maksimal 1.500 karakter untuk membuang noise DOM
                             text_content = text_content[:1500].strip()
                             
                             # Pra-filter lokal
@@ -270,7 +261,7 @@ def run_property_bot():
                         except Exception:
                             continue
 
-                    # Proses Analisis Postingan Terpilih
+                    # Analisis postingan yang lolos pra-filter
                     new_alerts_count = 0
                     for item in extracted_posts:
                         line_clean = item["text"]
@@ -289,7 +280,7 @@ def run_property_bot():
                         sent_history.add(post_id)
                         save_history(sent_history)
                         
-                        # Jeda peredam 5 detik agar RPM per key tetap dingin di ~4 RPM
+                        # Jeda 5 detik per postingan agar RPM setiap key tetap dingin
                         time.sleep(5)
                     
                     print(f"✅ Selesai mengecek Grup {idx}. Ditemukan: {new_alerts_count} Hidden Gem.")
@@ -305,7 +296,7 @@ def run_property_bot():
         print(f"❌ Terjadi kesalahan utama pada scraping: {e}")
 
 def safe_job():
-    """Wrapper pelindung agar penjadwalan tetap jalan jika terjadi error koneksi."""
+    """Wrapper pelindung agar loop schedule tetap berjalan jika ada error tak terduga."""
     try:
         run_property_bot()
     except Exception as e:
