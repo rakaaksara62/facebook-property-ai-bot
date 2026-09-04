@@ -5,7 +5,6 @@ import requests
 import schedule
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
 from playwright.sync_api import sync_playwright
 
 # --- LOAD ENVIRONMENT VARIABLES ---
@@ -14,7 +13,7 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# --- INISIALISASI GEMINI MULTI-KEY ROTATION ---
+# --- INISIALISASI GEMINI MULTI-KEY ROTATION (EXPLICIT INDEX) ---
 RAW_KEYS = os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", ""))
 API_KEYS = [k.strip().strip('"').strip("'") for k in RAW_KEYS.split(",") if k.strip()]
 
@@ -82,27 +81,31 @@ def is_potential_property_text(text):
 
 def analyze_post_with_gemini(post_text):
     """
-    Mengirim teks ke Gemini tanpa AFC, menggunakan response_mime_type JSON murni
-    agar respons stabil dan hemat resource.
+    Mengirim teks ke Gemini tanpa AFC, dengan pencatatan error detail langsung ke console.
     """
-    system_prompt = (
-        "Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem yang berfokus di area JAKARTA BARAT. "
-        "Tugasmu mendeteksi HANYA properti yang tergolong HIDDEN GEM / BUTUH UANG (BU) / DI BAWAH HARGA PASAR di wilayah Jakarta Barat. "
-        "Aturan ketat:\n"
-        "1. Prioritaskan area Jakarta Barat (Cengkareng, Kalideres, Kebon Jeruk, Kembangan, Puri, Meruya, Tanjung Duren, Grogol, Palmerah, Joglo, Daan Mogot).\n"
-        "2. Tolak keras iklan sales/developer perumahan baru, brosur subsidi, atau promo indent (beri score < 5 atau is_property: false).\n"
-        "3. Beri score 7-10 hanya untuk listing owner langsung, rumah second BU kepepet, rumah tua hitung tanah murah, atau over kredit murah.\n"
-        "Output WAJIB berupa objek JSON valid dengan field persis:\n"
-        '{"is_property": bool, "score": int, "jenis": str, "lokasi": str, "harga": str, "alasan_menarik": str}'
-    )
+    prompt = f"""
+    Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem yang berfokus di area JAKARTA BARAT.
+    Tugasmu menganalisis postingan Facebook dan HANYA meloloskan properti yang berstatus HIDDEN GEM / BUTUH UANG (BU) / DI BAWAH HARGA PASAR di wilayah Jakarta Barat dan sekitarnya.
 
-    user_content = f"Berikut teks postingan Facebook:\n\"\"\"{post_text}\"\"\""
+    Berikut teks postingannya:
+    \"\"\"{post_text}\"\"\"
 
-    config = types.GenerateContentConfig(
-        system_instruction=system_prompt,
-        response_mime_type="application/json",
-        temperature=0.2,
-    )
+    ATURAN EVALUASI:
+    1. VALIDASI LOKASI: Prioritaskan Jakarta Barat (Cengkareng, Kalideres, Kebon Jeruk, Kembangan, Puri, Meruya, Tanjung Duren, Grogol, Palmerah, Joglo, Daan Mogot). Jika lokasi jelas di luar Jakbar, beri score < 5 atau is_property: false.
+    2. TOLAK SPAM/DEVELOPER: Iklan developer perumahan baru indent, promo brosur KPR komersial, perumahan subsidi luar kota -> score < 5 / is_property: false.
+    3. KRITERIA HIDDEN GEM (Skor 7-10): Owner langsung BU, rumah tua hitung tanah murah, over kredit kepepet, SHM/HGB jelas.
+    4. ANALISIS: Tulis alasan ringkas dan tajam kenapa properti ini peluang bagus bagi investor.
+
+    Format output WAJIB HANYA JSON murni (tanpa markdown fences):
+    {{
+      "is_property": true,
+      "score": 8,
+      "jenis": "Rumah",
+      "lokasi": "Nama daerah di Jakbar atau Unknown",
+      "harga": "Harga tertera atau Tidak dicantumkan",
+      "alasan_menarik": "Penjelasan ringkas tajam investor (maksimal 3 kalimat)"
+    }}
+    """
 
     total_keys = len(clients)
     for attempt in range(total_keys):
@@ -112,19 +115,21 @@ def analyze_post_with_gemini(post_text):
         try:
             response = active_client.models.generate_content(
                 model='gemini-3.6-flash',
-                contents=user_content,
-                config=config
+                contents=prompt
             )
             raw_text = response.text.strip()
-            return json.loads(raw_text)
+            clean_json = raw_text.replace("```json", "").replace("```", "").strip()
+            return json.loads(clean_json)
 
         except Exception as e:
             err_msg = str(e)
+            # Tampilkan detail error asli ke output log
+            print(f"❌ [Key {key_num}] GAGAL! Detail: {err_msg[:250]}")
+            
             if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "503" in err_msg:
-                print(f"🔄 [Key {key_num}] terkena limit/overload. Menunggu 3 detik lalu alihkan...")
+                print(f"⏳ Jeda 3 detik sebelum beralih ke key berikutnya...")
                 time.sleep(3)
             else:
-                print(f"⚠️ Error analisis [Key {key_num}]: {e}")
                 time.sleep(1)
 
     return None
@@ -214,7 +219,7 @@ def run_property_bot():
                     page.goto(current_group_url, timeout=90000)
                     time.sleep(6)
                     
-                    # Scroll feed perlahan
+                    # Scroll feed untuk memuat postingan
                     for _ in range(3):
                         page.mouse.wheel(0, 1500)
                         time.sleep(3)
@@ -233,10 +238,10 @@ def run_property_bot():
                             ]
                             text_content = "\n".join(cleaned_lines)
                             
-                            # Batasi panjang maksimal 1.500 karakter untuk membuang noise DOM
+                            # Pangkas teks maksimal 1.500 karakter untuk membuang komentar/sampah DOM
                             text_content = text_content[:1500].strip()
                             
-                            # Pra-filter lokal
+                            # Pra-filter kata kunci
                             if len(text_content) < 40 or not is_potential_property_text(text_content):
                                 continue
                             
@@ -261,7 +266,7 @@ def run_property_bot():
                         except Exception:
                             continue
 
-                    # Analisis postingan yang lolos pra-filter
+                    # Proses analisis
                     new_alerts_count = 0
                     for item in extracted_posts:
                         line_clean = item["text"]
@@ -280,7 +285,7 @@ def run_property_bot():
                         sent_history.add(post_id)
                         save_history(sent_history)
                         
-                        # Jeda 5 detik per postingan agar RPM setiap key tetap dingin
+                        # Jeda 5 detik antar postingan agar RPM setiap key tetap dingin
                         time.sleep(5)
                     
                     print(f"✅ Selesai mengecek Grup {idx}. Ditemukan: {new_alerts_count} Hidden Gem.")
@@ -296,11 +301,11 @@ def run_property_bot():
         print(f"❌ Terjadi kesalahan utama pada scraping: {e}")
 
 def safe_job():
-    """Wrapper pelindung agar loop schedule tetap berjalan jika ada error tak terduga."""
+    """Wrapper pelindung agar jadwal rutin tidak terputus bila terjadi error."""
     try:
         run_property_bot()
     except Exception as e:
-        print(f"⚠️ Kesalahan saat eksekusi rutin: {e}")
+        print(f"⚠️ Kesalahan saat mengeksekusi siklus rutin: {e}")
 
 if __name__ == "__main__":
     safe_job()
