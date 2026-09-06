@@ -28,7 +28,8 @@ print("🔑 Client Gemini berhasil diinisialisasi.")
 AVAILABLE_MODELS = [
     "gemini-2.5-flash",        # Utama: Cepat, stabil, kuota longgar
     "gemini-2.5-flash-lite",   # Cadangan 1: Sangat ringan, throughput tinggi
-    "gemini-3.6-flash"         # Cadangan 2: Analisis mendalam
+    "gemini-3.6-flash",         # Cadangan 2: Analisis mendalam
+    "gemini-3.5-flash"
 ]
 CURRENT_MODEL_INDEX = 0
 
