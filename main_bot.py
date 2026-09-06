@@ -13,25 +13,34 @@ load_dotenv()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
 
-# --- INISIALISASI GEMINI MULTI-KEY ROTATION (EXPLICIT INDEX) ---
+# Ambil API key utama
 RAW_KEYS = os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", ""))
-API_KEYS = [k.strip().strip('"').strip("'") for k in RAW_KEYS.split(",") if k.strip()]
+API_KEY = [k.strip().strip('"').strip("'") for k in RAW_KEYS.split(",") if k.strip()][0]
 
-if not API_KEYS:
-    raise ValueError("❌ Tidak ada GEMINI_API_KEY atau GEMINI_API_KEYS yang ditemukan di file .env!")
+if not API_KEY:
+    raise ValueError("❌ Tidak ada GEMINI_API_KEY yang ditemukan di file .env!")
 
-print(f"🔑 Berhasil memuat {len(API_KEYS)} Gemini API Key untuk rotasi beban.")
-clients = [genai.Client(api_key=key) for key in API_KEYS]
-CURRENT_KEY_INDEX = 0
+# Inisialisasi client tunggal
+client = genai.Client(api_key=API_KEY)
+print("🔑 Client Gemini berhasil diinisialisasi.")
 
-def get_next_client():
-    """Mengambil client berikutnya secara berurutan dan memajukan pointer."""
-    global CURRENT_KEY_INDEX
-    idx = CURRENT_KEY_INDEX
-    client = clients[idx]
-    key_num = idx + 1
-    CURRENT_KEY_INDEX = (CURRENT_KEY_INDEX + 1) % len(clients)
-    return client, key_num
+# Model target secara hierarki (Fallback Cascade)
+AVAILABLE_MODELS = [
+    "gemini-2.5-flash",        # Utama: Cepat, stabil, kuota longgar
+    "gemini-2.5-flash-lite",   # Cadangan 1: Sangat ringan, throughput tinggi
+    "gemini-3.6-flash"         # Cadangan 2: Analisis mendalam
+]
+CURRENT_MODEL_INDEX = 0
+
+def get_current_model():
+    """Mengambil model aktif saat ini."""
+    return AVAILABLE_MODELS[CURRENT_MODEL_INDEX]
+
+def switch_to_next_model():
+    """Beralih ke model berikutnya jika model aktif mengalami limit atau error."""
+    global CURRENT_MODEL_INDEX
+    CURRENT_MODEL_INDEX = (CURRENT_MODEL_INDEX + 1) % len(AVAILABLE_MODELS)
+    print(f"🔄 Berpindah ke model cadangan: [{AVAILABLE_MODELS[CURRENT_MODEL_INDEX]}]")
 
 # ------------------------------------------------------------------
 # 📌 LIST GRUP TARGET JAKARTA BARAT
@@ -46,14 +55,10 @@ else:
 
 HISTORY_FILE = "sent_posts.json"
 
-# Kata kunci umum & kawasan Jakarta Barat untuk pra-filter lokal (hemat kuota)
 PROPERTY_KEYWORDS = [
-    # Status transaksi cepat
     "rumah", "tanah", "ruko", "dijual", "jual", "bu", "butuh uang", "cepat", 
     "kepepet", "shm", "hgb", "ajb", "over kredit", "take over", "nego", "miliar", 
     "milyar", "juta", "jt", "kavling", "lt", "lb", "luas", "hitung tanah",
-    
-    # Wilayah / Kawasan Jakarta Barat
     "jakbar", "jakarta barat", "cengkareng", "kalideres", "kebon jeruk", 
     "puri", "puri indah", "kembangan", "meruya", "grogol", "petamburan", 
     "tanjung duren", "palmerah", "tamansari", "tambora", "daan mogot", 
@@ -75,13 +80,12 @@ def save_history(history):
         json.dump(list(history), f)
 
 def is_potential_property_text(text):
-    """Pra-filter lokal sebelum memanggil API Gemini."""
     text_lower = text.lower()
     return any(keyword in text_lower for keyword in PROPERTY_KEYWORDS)
 
 def analyze_post_with_gemini(post_text):
     """
-    Mengirim teks ke Gemini tanpa AFC, dengan pencatatan error detail langsung ke console.
+    Menganalisis listing properti dengan sistem Model Fallback Cascade.
     """
     prompt = f"""
     Kamu adalah seorang Investor Properti Senior & Finder Hidden Gem yang berfokus di area JAKARTA BARAT.
@@ -90,31 +94,33 @@ def analyze_post_with_gemini(post_text):
     Berikut teks postingannya:
     \"\"\"{post_text}\"\"\"
 
-    ATURAN EVALUASI:
-    1. VALIDASI LOKASI: Prioritaskan Jakarta Barat (Cengkareng, Kalideres, Kebon Jeruk, Kembangan, Puri, Meruya, Tanjung Duren, Grogol, Palmerah, Joglo, Daan Mogot). Jika lokasi jelas di luar Jakbar, beri score < 5 atau is_property: false.
-    2. TOLAK SPAM/DEVELOPER: Iklan developer perumahan baru indent, promo brosur KPR komersial, perumahan subsidi luar kota -> score < 5 / is_property: false.
-    3. KRITERIA HIDDEN GEM (Skor 7-10): Owner langsung BU, rumah tua hitung tanah murah, over kredit kepepet, SHM/HGB jelas.
-    4. ANALISIS: Tulis alasan ringkas dan tajam kenapa properti ini peluang bagus bagi investor.
+    ATURAN EVALUASI & FILTER:
+    1. VALIDASI LOKASI: Prioritaskan area Jakarta Barat (Cengkareng, Kalideres, Kebon Jeruk, Kembangan, Puri, Meruya, Tanjung Duren, Grogol, Palmerah, Joglo, Daan Mogot, Tambora, Tamansari). Jika lokasi tidak jelas/di luar Jakbar, beri score < 5 atau "is_property": false.
+    2. TOLAK SPAM/DEVELOPER: Iklan sales rumah baru, promo KPR komersil, brosur subsidi luar kota -> score < 5 atau "is_property": false.
+    3. DETEKSI LEGALITAS: Ambil status surat legalitas (SHM, HGB, AJB, Girik, atau Tidak Disebutkan).
+    4. KRITERIA SKOR TINGGI (7 - 10): Owner langsung BU, rumah tua hitung tanah, take over kepepet, peluang flipping tinggi.
+    5. ANALISIS INVESTOR: Tulis analisis tajam maksimal 3 kalimat (alasan margin, cash flow sewa, atau bargain price).
 
     Format output WAJIB HANYA JSON murni (tanpa markdown fences):
     {{
       "is_property": true,
       "score": 8,
       "jenis": "Rumah",
-      "lokasi": "Nama daerah di Jakbar atau Unknown",
+      "lokasi": "Nama kawasan/daerah di Jakarta Barat",
+      "legalitas": "SHM / HGB / AJB / Tidak Disebutkan",
       "harga": "Harga tertera atau Tidak dicantumkan",
-      "alasan_menarik": "Penjelasan ringkas tajam investor (maksimal 3 kalimat)"
+      "alasan_menarik": "Analisis tajam investor (maksimal 3 kalimat)"
     }}
     """
 
-    total_keys = len(clients)
-    for attempt in range(total_keys):
-        active_client, key_num = get_next_client()
-        print(f"🤖 Mengirim analisis ke Gemini menggunakan [Key {key_num}/{total_keys}]...")
+    # Coba model-model yang tersedia secara berurutan
+    for _ in range(len(AVAILABLE_MODELS)):
+        active_model = get_current_model()
+        print(f"🤖 Mengirim analisis ke Gemini menggunakan model [{active_model}]...")
 
         try:
-            response = active_client.models.generate_content(
-                model='gemini-3.6-flash',
+            response = client.models.generate_content(
+                model=active_model,
                 contents=prompt
             )
             raw_text = response.text.strip()
@@ -123,12 +129,12 @@ def analyze_post_with_gemini(post_text):
 
         except Exception as e:
             err_msg = str(e)
-            # Tampilkan detail error asli ke output log
-            print(f"❌ [Key {key_num}] GAGAL! Detail: {err_msg[:250]}")
+            print(f"❌ Model [{active_model}] kendala: {err_msg[:200]}")
             
-            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "503" in err_msg:
-                print(f"⏳ Jeda 3 detik sebelum beralih ke key berikutnya...")
-                time.sleep(3)
+            # Jika terkena rate-limit / model overload / model unavail
+            if "429" in err_msg or "RESOURCE_EXHAUSTED" in err_msg or "503" in err_msg or "404" in err_msg:
+                switch_to_next_model()
+                time.sleep(2)
             else:
                 time.sleep(1)
 
@@ -143,6 +149,7 @@ def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=Non
         f"⭐ *Skor Potensi:* `{ai_data.get('score')}/10`\n"
         f"🏠 *Jenis:* {ai_data.get('jenis', 'Unknown')}\n"
         f"📍 *Lokasi:* {ai_data.get('lokasi', 'Unknown')}\n"
+        f"📄 *Legalitas:* {ai_data.get('legalitas', 'Tidak Disebutkan')}\n"
         f"💰 *Harga:* {ai_data.get('harga', 'Unknown')}\n\n"
         f"🧠 *Analisis Investor (AI):*\n_{alasan}_\n\n"
         f"📝 *Postingan Asli:*\n{clean_raw}...\n\n"
@@ -164,7 +171,7 @@ def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=Non
             if res.status_code == 200:
                 return
             else:
-                print(f"⚠️ Gagal kirim foto ke Telegram ({res.status_code}). Beralih ke teks biasa...")
+                print(f"⚠️ Gagal kirim foto ({res.status_code}). Beralih ke teks biasa...")
         except Exception as e:
             print(f"⚠️ Exception kirim foto: {e}. Beralih ke teks biasa...")
 
@@ -192,7 +199,7 @@ def send_telegram_ai_alert(ai_data, raw_text, post_url, group_url, photo_url=Non
         print(f"❌ Error fatal kirim ke Telegram: {e}")
 
 def run_property_bot():
-    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🚀 Memulai Pengecekan Rutin Multi-Grup Jakbar ({len(TARGET_GROUPS)} Grup Target)...")
+    print(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] 🚀 Memulai Pengecekan Rutin ({len(TARGET_GROUPS)} Grup Target)...")
     sent_history = load_history()
     
     try:
@@ -219,7 +226,7 @@ def run_property_bot():
                     page.goto(current_group_url, timeout=90000)
                     time.sleep(6)
                     
-                    # Scroll feed untuk memuat postingan
+                    # Scroll feed untuk memuat postingan terbaru
                     for _ in range(3):
                         page.mouse.wheel(0, 1500)
                         time.sleep(3)
@@ -238,10 +245,10 @@ def run_property_bot():
                             ]
                             text_content = "\n".join(cleaned_lines)
                             
-                            # Pangkas teks maksimal 1.500 karakter untuk membuang komentar/sampah DOM
+                            # Batasi teks maksimal 1.500 karakter untuk membuang noise DOM
                             text_content = text_content[:1500].strip()
                             
-                            # Pra-filter kata kunci
+                            # Pra-filter lokal kata kunci
                             if len(text_content) < 40 or not is_potential_property_text(text_content):
                                 continue
                             
@@ -285,7 +292,7 @@ def run_property_bot():
                         sent_history.add(post_id)
                         save_history(sent_history)
                         
-                        # Jeda 5 detik antar postingan agar RPM setiap key tetap dingin
+                        # Jeda 5 detik agar laju RPM tetap dingin di sisi Google
                         time.sleep(5)
                     
                     print(f"✅ Selesai mengecek Grup {idx}. Ditemukan: {new_alerts_count} Hidden Gem.")
@@ -305,7 +312,7 @@ def safe_job():
     try:
         run_property_bot()
     except Exception as e:
-        print(f"⚠️ Kesalahan saat mengeksekusi siklus rutin: {e}")
+        print(f"⚠️ Kesalahan saat eksekusi rutin: {e}")
 
 if __name__ == "__main__":
     safe_job()
