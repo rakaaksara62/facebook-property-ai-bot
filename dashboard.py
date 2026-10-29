@@ -1,149 +1,161 @@
+"""
+================================================================================
+PROPERTY BOT & AI ENGINE DASHBOARD (DASHBOARD.PY)
+================================================================================
+Dashboard monitoring berbasis Streamlit untuk memantau performa, kuota, latency,
+status sesi Facebook, dan statistik listing properti secara visual.
+Jalankan dengan perintah: streamlit run dashboard.py
+================================================================================
+"""
+
 import os
+import sys
 import time
 import json
 import streamlit as st
 import pandas as pd
 from dotenv import load_dotenv
-from google import genai
 
-# Konfigurasi Halaman Streamlit
+# Setup encoding
+if sys.stdout.encoding != 'utf-8':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except Exception:
+        pass
+
+load_dotenv(override=True)
+
+from config import (
+    GROQ_API_KEY,
+    GROQ_MODEL,
+    GEMINI_API_KEYS,
+    COOKIE_FILE,
+    SEEN_POSTS_FILE,
+    FACEBOOK_GROUPS,
+    TELEGRAM_TOKEN,
+    CHAT_ID
+)
+from storage import is_session_valid, load_seen_posts
+
 st.set_page_config(
-    page_title="Gemini Multi-Key Monitor | Jakarta Barat Bot",
-    page_icon="⚡",
+    page_title="AI Property Bot & Groq Monitor",
+    page_icon="🏢",
     layout="wide"
 )
 
-# Load file environment
-load_dotenv()
+st.title("🏢 Real Estate Intelligence Bot - Control Dashboard")
+st.caption("Pemantau status kesehatan sistem bot scraper, Groq AI, sesi Facebook, dan aktivitas notifikasi.")
 
-HISTORY_FILE = "sent_posts.json"
+# ------------------------------------------------------------------------------
+# 1. METRIK UTAMA
+# ------------------------------------------------------------------------------
+seen_posts = load_seen_posts()
+valid_sess, sess_desc = is_session_valid(COOKIE_FILE)
 
-st.title("⚡ Gemini Multi-Key & Property Bot Monitor")
-st.caption("Dashboard pemantau status kesehatan API Key, latency, estimasi kapasitas pool, dan aktivitas bot.")
-
-# 1. AMBIL KEYS DARI .ENV
-raw_keys = os.getenv("GEMINI_API_KEYS", os.getenv("GEMINI_API_KEY", ""))
-api_keys = [k.strip() for k in raw_keys.split(",") if k.strip()]
-
-if not api_keys:
-    st.error("⚠️ Tidak ada `GEMINI_API_KEYS` atau `GEMINI_API_KEY` yang ditemukan di file `.env`.")
-    st.stop()
-
-# 2. METRIK RINGKASAN POOL
 col1, col2, col3, col4 = st.columns(4)
-
-total_keys = len(api_keys)
-col1.metric("Total API Keys", f"{total_keys} Key(s)")
-col2.metric("Pool RPM Capacity", f"{total_keys * 15} RPM")
-col3.metric("Est. Pool RPD Capacity", f"~{total_keys * 1500:,} Req/Hari")
-
-# Baca history postingan tersimpan
-processed_count = 0
-if os.path.exists(HISTORY_FILE):
-    try:
-        with open(HISTORY_FILE, "r") as f:
-            data = json.load(f)
-            processed_count = len(data)
-    except Exception:
-        processed_count = 0
-
-col4.metric("Postingan Diproses", f"{processed_count} Post")
+col1.metric("Facebook Target Groups", f"{len(FACEBOOK_GROUPS)} Grup")
+col2.metric("Total Listing Diproses", f"{len(seen_posts)} Post")
+col3.metric("AI Engine Utama", f"Groq ({GROQ_MODEL.split('/')[-1]})")
+col4.metric("Status Sesi FB", "🟢 Valid" if valid_sess else "🔴 Kadaluarsa")
 
 st.markdown("---")
 
-# 3. PENGUJIAN STATUS TIAP API KEY
-st.subheader("🔑 Status Kesehatan API Key (Real-time Health Check)")
+# ------------------------------------------------------------------------------
+# 2. STATUS GROQ AI ENGINE
+# ------------------------------------------------------------------------------
+st.subheader("⚡ Status Groq AI Engine (Model: openai/gpt-oss-120b)")
 
-def mask_key(k):
-    if len(k) <= 10:
-        return "****"
-    return f"{k[:6]}...{k[-4:]}"
-
-def test_api_key(key):
-    """Menguji respon langsung dari Gemini API."""
-    client = genai.Client(api_key=key)
-    start_time = time.time()
+def test_groq():
+    if not GROQ_API_KEY:
+        return {"status": "❌ Missing Key", "latency": "-", "message": "GROQ_API_KEY belum disetel"}
     try:
-        response = client.models.generate_content(
-            model='gemini-3.6-flash',
-            contents="ping"
+        from groq import Groq
+        client = Groq(api_key=GROQ_API_KEY)
+        start = time.time()
+        res = client.chat.completions.create(
+            model=GROQ_MODEL,
+            messages=[{"role": "user", "content": "Ping"}],
+            max_tokens=20
         )
-        latency = round((time.time() - start_time) * 1000, 2)
+        duration = round((time.time() - start) * 1000, 2)
         return {
             "status": "🟢 Healthy",
-            "latency": f"{latency} ms",
-            "code": 200,
-            "message": "Model responsive"
+            "latency": f"{duration} ms",
+            "message": f"Model responsif ({res.model})"
         }
     except Exception as e:
-        latency = round((time.time() - start_time) * 1000, 2)
-        err = str(e)
-        if "429" in err or "RESOURCE_EXHAUSTED" in err:
-            return {
-                "status": "🔴 Rate Limited (429)",
-                "latency": f"{latency} ms",
-                "code": 429,
-                "message": "Quota limit reached / Cooldown required"
-            }
-        elif "API_KEY_INVALID" in err or "400" in err:
-            return {
-                "status": "❌ Invalid Key",
-                "latency": f"{latency} ms",
-                "code": 400,
-                "message": "API key is not valid"
-            }
-        else:
-            return {
-                "status": "⚠️ Error",
-                "latency": f"{latency} ms",
-                "code": 500,
-                "message": err[:80]
-            }
+        return {"status": "⚠️ Error", "latency": "-", "message": str(e)[:100]}
 
-if st.button("🔄 Jalankan Diagnosa Ulang Sekarang"):
-    st.rerun()
+groq_res = test_groq()
 
-results = []
-progress_bar = st.progress(0)
+groq_col1, groq_col2, groq_col3 = st.columns(3)
+groq_col1.metric("Groq Status", groq_res["status"])
+groq_col2.metric("Latency", groq_res["latency"])
+groq_col3.info(f"**Detail:** {groq_res['message']}")
 
-for idx, key in enumerate(api_keys):
-    check = test_api_key(key)
-    results.append({
-        "No": idx + 1,
-        "Key Masked": mask_key(key),
-        "Status": check["status"],
-        "Latency": check["latency"],
-        "HTTP Code": check["code"],
-        "Catatan": check["message"]
-    })
-    progress_bar.progress((idx + 1) / total_keys)
+# ------------------------------------------------------------------------------
+# 3. STATUS GOOGLE GEMINI POOL (JIKA TERSEDIA)
+# ------------------------------------------------------------------------------
+if GEMINI_API_KEYS:
+    st.markdown("---")
+    st.subheader("🔑 Google Gemini Fallback Pool Status")
 
-progress_bar.empty()
+    def test_gemini_key(key):
+        from google import genai
+        client = genai.Client(api_key=key)
+        start_time = time.time()
+        try:
+            res = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents="ping"
+            )
+            lat = round((time.time() - start_time) * 1000, 2)
+            return {"status": "🟢 Healthy", "latency": f"{lat} ms", "msg": "OK"}
+        except Exception as e:
+            err = str(e)
+            return {"status": "🔴 Error", "latency": "-", "msg": err[:80]}
 
-df = pd.DataFrame(results)
-st.dataframe(df, use_container_width=True, hide_index=True)
+    gem_results = []
+    for idx, k in enumerate(GEMINI_API_KEYS, 1):
+        masked = f"{k[:6]}...{k[-4:]}" if len(k) > 10 else "****"
+        chk = test_gemini_key(k)
+        gem_results.append({
+            "No": idx,
+            "Key": masked,
+            "Status": chk["status"],
+            "Latency": chk["latency"],
+            "Catatan": chk["msg"]
+        })
 
-# 4. STATISTIK SISTEM & BOT INSIGHT
+    st.dataframe(pd.DataFrame(gem_results), use_container_width=True, hide_index=True)
+
+# ------------------------------------------------------------------------------
+# 4. KESEHATAN SISTEM & AKUN FACEBOOK
+# ------------------------------------------------------------------------------
 st.markdown("---")
-st.subheader("📊 Statistik Beban & Rekomendasi")
+st.subheader("🛡️ Informasi Keamanan & Sesi Facebook")
 
-healthy_keys = sum(1 for r in results if "🟢" in r["Status"])
-rate_limited_keys = sum(1 for r in results if "🔴" in r["Status"])
+col_info1, col_info2 = st.columns(2)
 
-col_sub1, col_sub2 = st.columns(2)
-
-with col_sub1:
-    st.info(f"""
-    **Kondisi Pool Saat Ini:**
-    * **Aktif / Siap Pakai:** `{healthy_keys} / {total_keys}` Key
-    * **Cooldown / Limit 429:** `{rate_limited_keys}` Key
-    """)
-
-with col_sub2:
-    if rate_limited_keys > 0:
-        st.warning(
-            "Terdapat Key yang menyentuh batas RPM/RPD. Sistem rotasi bot di `main_bot.py` "
-            "akan otomatis mengalihkan request ke key berikutnya."
-        )
+with col_info1:
+    st.markdown("### 📋 Detail Sesi Facebook")
+    st.write(f"- **Berkas Cookie:** `{COOKIE_FILE}`")
+    st.write(f"- **Kondisi:** {sess_desc}")
+    if not valid_sess:
+        st.warning("⚠️ Sesi Facebook belum aktif. Silakan buka terminal dan jalankan:\n`python save_session.py`")
     else:
-        st.success("Seluruh API Key siap dan memiliki throughput maksimal.")
+        st.success("✅ Sesi autentikasi Facebook siap digunakan untuk scraping.")
+
+with col_info2:
+    st.markdown("### ✈️ Integrasi Telegram Alert")
+    if TELEGRAM_TOKEN and CHAT_ID:
+        masked_token = f"{TELEGRAM_TOKEN[:8]}...{TELEGRAM_TOKEN[-5:]}"
+        st.write(f"- **Telegram Bot:** `{masked_token}`")
+        st.write(f"- **Chat ID Tujuan:** `{CHAT_ID}`")
+        st.success("✅ Notifikasi Telegram terkonfigurasi dengan format HTML & Multipart Buffer.")
+    else:
+        st.error("❌ Telegram token atau Chat ID belum terisi di file .env.")
+
+if st.button("🔄 Segarkan Data Diagnostik"):
+    st.rerun()

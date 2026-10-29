@@ -1,16 +1,140 @@
-# Environment & Secret Variables
-.env
-fb_state.json
-sent_posts.json
+# ==============================================================================
+# GITIGNORE - FACEBOOK PROPERTY AI INTELLIGENCE BOT
+# ==============================================================================
+# Berkas & folder berikut TIDAK BOLEH di-upload ke repository Git untuk menjaga
+# keamanan kredensial, sesi akun, data cache lokal, dan kebersihan repository.
+# ==============================================================================
 
-# Virtual Environment
+# ------------------------------------------------------------------------------
+# 1. KREDENSIAL & VARIABEL LINGKUNGAN SENSITIF (CRITICAL SECURITY)
+# ------------------------------------------------------------------------------
+# Jangan pernah mengunggah file .env karena berisi GROQ_API_KEY, TELEGRAM_TOKEN, dll.
+.env
+.env*.local
+.env.production
+.env.staging
+*.env
+# Kecualikan template contoh agar tetap terlacak di git
+!.env.example
+
+# File kunci & sertifikat privat
+*.pem
+*.key
+*.cert
+*.crt
+secrets.json
+credentials.json
+
+# ------------------------------------------------------------------------------
+# 2. SESI LOGIN FACEBOOK & COOKIES (CRITICAL PRIVACY)
+# ------------------------------------------------------------------------------
+# File sesi browser yang berisi token otentikasi login akun Facebook
+fb_state.json
+fb_state.json.tmp
+fb_state*.json
+storage_state.json
+cookies.json
+session.json
+
+# ------------------------------------------------------------------------------
+# 3. RIWAYAT DATA LOKAL & POSTINGAN TERPROSES (LOCAL CACHE)
+# ------------------------------------------------------------------------------
+# File cache ID postingan lokal agar tidak menimpa histori di komputer/server lain
+seen_posts.json
+seen_posts.json.tmp
+sent_posts.json
+sent_posts.json.tmp
+*.tmp
+*.temp
+
+# Berkas teks kustom/pribadi lokal (daftar grup/catatan lokal)
+list grup*.txt
+*grup*.txt
+notes.txt
+scratch.py
+scratch/
+
+# ------------------------------------------------------------------------------
+# 4. PYTHON VIRTUAL ENVIRONMENTS
+# ------------------------------------------------------------------------------
 venv/
 env/
 ENV/
+.venv/
+env.bak/
+venv.bak/
+bin/
+include/
+lib/
+lib64/
 
-# Python Cache & IDE Settings
+# ------------------------------------------------------------------------------
+# 5. PYTHON BYTECODE & CACHE
+# ------------------------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# ------------------------------------------------------------------------------
+# 6. LOGS & FILE OUTPUT RUNTIME
+# ------------------------------------------------------------------------------
+*.log
+logs/
+pip-log.txt
+pip-delete-this-directory.txt
+
+# ------------------------------------------------------------------------------
+# 7. ARTIFAK PLAYWRIGHT & BROWSER CACHE
+# ------------------------------------------------------------------------------
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+videos/
+screenshots/
+
+# ------------------------------------------------------------------------------
+# 8. KONFIGURASI IDE, CODE EDITOR & OS
+# ------------------------------------------------------------------------------
+# Visual Studio Code
 .vscode/
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+*.code-workspace
+
+# JetBrains (PyCharm, IntelliJ)
 .idea/
-api-tester.py
+*.iws
+*.iml
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Sistem Operasi (Windows, macOS, Linux)
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
