@@ -71,24 +71,36 @@ try:
 except AttributeError:
     pass  # SIGTERM mungkin tidak tersedia di beberapa platform Windows
 
+def get_wib_datetime() -> datetime:
+    """
+    Mengembalikan waktu saat ini dalam zona waktu Asia/Jakarta (WIB).
+    Memastikan perhitungan jadwal operasional selalu akurat meskipun server
+    berada di zona waktu UTC atau menggunakan init system minimal tanpa systemd.
+    """
+    try:
+        from zoneinfo import ZoneInfo
+        return datetime.now(ZoneInfo("Asia/Jakarta"))
+    except Exception:
+        return datetime.now()
+
 def get_operational_interval() -> tuple[int, str]:
     """
-    Menghitung interval jeda tidur berdasarkan jam operasional:
-    - Mode Siang (06:00 - 22:00): 1 jam sekali (3600 detik)
-    - Mode Malam (22:00 - 06:00): 2 jam sekali (7200 detik)
+    Menghitung interval jeda tidur berdasarkan jam operasional WIB:
+    - Mode Siang (06:00 - 22:00 WIB): 1 jam sekali (3600 detik)
+    - Mode Malam (22:00 - 06:00 WIB): 2 jam sekali (7200 detik)
     """
-    current_hour = datetime.now().hour
+    current_hour = get_wib_datetime().hour
     if 6 <= current_hour < 22:
-        return DAY_INTERVAL_SECONDS, f"Siang Mode (06:00 - 22:00) -> Interval: {DAY_INTERVAL_SECONDS // 60} Menit"
+        return DAY_INTERVAL_SECONDS, f"Siang Mode (06:00 - 22:00 WIB) -> Interval: {DAY_INTERVAL_SECONDS // 60} Menit (Jam sekarang: {current_hour}:00 WIB)"
     else:
-        return NIGHT_INTERVAL_SECONDS, f"Malam Mode (22:00 - 06:00) -> Interval: {NIGHT_INTERVAL_SECONDS // 60} Menit"
+        return NIGHT_INTERVAL_SECONDS, f"Malam Mode (22:00 - 06:00 WIB) -> Interval: {NIGHT_INTERVAL_SECONDS // 60} Menit (Jam sekarang: {current_hour}:00 WIB)"
 
 def main():
     """Fungsi eksekusi utama dengan arsitektur Watchdog 24/7."""
     print("\n" + "=" * 70)
     print("🏢 REAL ESTATE INTELLIGENCE BOT - FACEBOOK & GROQ AI")
     print(f"🤖 AI Engine     : Groq [{GROQ_MODEL}]")
-    print(f"🕒 Waktu Mulai   : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"🕒 Waktu Mulai   : {get_wib_datetime().strftime('%Y-%m-%d %H:%M:%S WIB')}")
     print("=" * 70 + "\n")
 
     # 1. Validasi konfigurasi awal
@@ -119,7 +131,7 @@ def main():
     while IS_RUNNING:
         cycle_start_time = time.time()
         logger.info("=" * 60)
-        logger.info(f"▶️ MEMULAI SIKLUS SCRAPING: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        logger.info(f"▶️ MEMULAI SIKLUS SCRAPING: {get_wib_datetime().strftime('%Y-%m-%d %H:%M:%S WIB')}")
         logger.info("=" * 60)
 
         try:
@@ -155,7 +167,12 @@ def main():
         # 4. Hitung Jeda Operasional (Siang / Malam)
         sleep_seconds, mode_info = get_operational_interval()
         next_cycle_epoch = time.time() + sleep_seconds
-        next_cycle_str = datetime.fromtimestamp(next_cycle_epoch).strftime('%H:%M:%S')
+        try:
+            from zoneinfo import ZoneInfo
+            next_dt = datetime.fromtimestamp(next_cycle_epoch, tz=ZoneInfo("Asia/Jakarta"))
+            next_cycle_str = next_dt.strftime('%H:%M:%S WIB')
+        except Exception:
+            next_cycle_str = datetime.fromtimestamp(next_cycle_epoch).strftime('%H:%M:%S')
 
         logger.info(f"⏰ Status Jadwal: {mode_info}")
         logger.info(f"💤 Bot tidur selama {sleep_seconds // 60} menit. Siklus berikutnya pada: {next_cycle_str}\n")

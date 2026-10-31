@@ -13,8 +13,10 @@
 5. [Panduan Instalasi & Menjalankan Bot](#-panduan-instalasi--menjalankan-bot)
 6. [Penjadwalan Operasional (Day & Night Mode)](#-penjadwalan-operasional-day--night-mode)
 7. [Format Notifikasi Telegram](#-format-notifikasi-telegram)
-8. [Tips Keamanan & Anti-Checkpoint Facebook](#-tips-keamanan--anti-checkpoint-facebook)
-9. [Troubleshooting & Solusi Masalah](#-troubleshooting--solusi-masalah)
+8. [Dashboard Monitoring Visual](#-dashboard-monitoring-visual)
+9. [Panduan Deployment AWS EC2 (24/7)](#-panduan-deployment-aws-ec2-247)
+10. [Tips Keamanan & Anti-Checkpoint Facebook](#-tips-keamanan--anti-checkpoint-facebook)
+11. [Troubleshooting & Solusi Masalah](#-troubleshooting--solusi-masalah)
 
 ---
 
@@ -72,6 +74,8 @@ facebook-property-bot/
 ├── telegram_notifier.py   # Pengiriman Telegram: multipart buffer photo upload & 3-level fallback
 ├── scraper.py             # Core Playwright engine: scraping feed FB, anti-detection, pre-filter
 ├── main_bot.py            # Entry point produksi 24/7 dengan Watchdog & Operational Scheduler
+├── run_bot.sh             # Script runner background & auto-restart watchdog (Linux/EC2)
+├── ecosystem.config.js    # Konfigurasi manajemen proses PM2 untuk menjalankan bot di EC2
 ├── save_session.py        # Tool interaktif login Facebook & penyimpan sesi cookies
 ├── test_system.py         # All-in-One diagnostic tool (health check 5 komponen sebelum running)
 ├── dashboard.py           # Dashboard monitoring visual berbasis web (Streamlit)
@@ -248,6 +252,173 @@ Dashboard menampilkan:
 - Status kesehatan Groq AI & Google Gemini Pool.
 - Real-time latency (ms) masing-masing model.
 - Validitas sesi akun Facebook.
+
+---
+
+## ☁️ Panduan Deployment AWS EC2 (24/7)
+
+Berikut panduan langkah demi langkah menjalankan bot scraper di **Amazon Web Services (AWS) EC2** agar berjalan 24/7 tanpa henti:
+
+### 1. Spesifikasi Instance & Rekomendasi
+- **OS**: Ubuntu 22.04 LTS / 24.04 LTS.
+- **Tipe Instance**: `t3.small` (2 vCPU, 2 GB RAM) direkomendasikan.
+- **Bagi Pengguna Free Tier (`t2.micro` / `t3.micro` - 1 GB RAM)**: WAJIB membuat 2GB Swap Memory agar Chromium Playwright tidak dihentikan oleh OS (*Out of Memory*):
+  ```bash
+  sudo fallocate -l 2G /swapfile
+  sudo chmod 600 /swapfile
+  sudo mkswap /swapfile
+  sudo swapon /swapfile
+  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
+  ```
+
+### 2. Pengaturan Zona Waktu Server (Asia/Jakarta - WIB)
+> ⚠️ **Catatan Penting Timedatectl**: Di beberapa instance EC2 minimal atau container, perintah `timedatectl` sering kali gagal/error karena systemd bus tidak aktif. Gunakan perintah **symlink `/etc/localtime`** langsung yang terbukti 100% berhasil:
+```bash
+# Set timezone ke Asia/Jakarta via symlink
+sudo ln -sf /usr/share/zoneinfo/Asia/Jakarta /etc/localtime
+
+# Verifikasi waktu server (harus menampilkan WIB)
+date
+```
+*(Selain itu, kode bot di `main_bot.py` juga sudah dilengkapi proteksi `zoneinfo` internal sehingga jadwal Siang/Malam akan selalu akurat mengikuti WIB).*
+
+### 3. Cara Mengupload File dari Komputer Lokal (Windows) ke EC2
+
+Karena file `.env` dan `fb_state.json` berisi data rahasia yang tidak boleh masuk Git, Anda perlu menguploadnya secara langsung dari laptop ke server EC2:
+
+#### 📂 Cara A: Menggunakan Aplikasi GUI WinSCP / FileZilla (Paling Mudah & Visual)
+1. Unduh dan buka **WinSCP** atau **FileZilla**.
+2. Buat koneksi baru (*New Session*):
+   - **File protocol**: `SFTP`
+   - **Host name**: Masukkan *Public IPv4 Address* EC2 Anda.
+   - **Port number**: `22`
+   - **User name**: `ubuntu` (atau `ec2-user`)
+   - **Password**: Kosongkan.
+3. Pasang kunci SSH:
+   - Klik tombol **Advanced...** ➔ masuk ke menu **SSH** ➔ **Authentication**.
+   - Pada kolom *Private key file*, pilih file `.pem` Anda (WinSCP akan otomatis menawarkan konversi ke `.ppk`, klik OK).
+4. Klik **Login**. Jendela Windows Explorer di kiri dan direktori server EC2 di kanan akan terbuka.
+5. Cukup *drag & drop* file `.env` dan `fb_state.json` dari laptop Anda langsung ke folder `/home/ubuntu/facebook-property-bot/`.
+
+#### 💻 Cara B: Menggunakan Terminal PowerShell Windows (SCP)
+Buka PowerShell di folder project lokal Anda (`c:\Users\User\facebook-property-bot`), lalu ketik:
+```powershell
+# Ganti path kunci dan IP server dengan data EC2 Anda
+scp -i "C:\path\ke\kunci-anda.pem" .env fb_state.json ubuntu@<IP_PUBLIK_EC2>:~/facebook-property-bot/
+```
+
+---
+
+### 4. Instalasi Dependensi di EC2
+Masuk ke terminal SSH EC2:
+```bash
+sudo apt update && sudo apt install -y python3-pip python3-venv git curl
+cd ~/facebook-property-bot
+python3 -m venv venv
+source venv/bin/activate
+pip install -r requirements.txt
+
+# Install Playwright browser beserta dependensi sistem Linux
+playwright install --with-deps chromium
+```
+
+---
+
+### 5. Cara Menjalankan Bot 24/7 di EC2
+
+#### 👑 METODE 1: Menggunakan PM2 (Sangat Direkomendasikan!)
+Jika Anda terbiasa dengan **PM2**, metode ini adalah yang paling stabil, modern, dan tidak bergantung pada systemd OS:
+
+1. **Install Node.js & PM2 di EC2 (jika belum ada)**:
+   ```bash
+   sudo apt install -y nodejs npm
+   sudo npm install -g pm2
+   ```
+
+2. **Jalankan Bot dengan file konfigurasi `ecosystem.config.js` bawaan**:
+   ```bash
+   cd ~/facebook-property-bot
+   pm2 start ecosystem.config.js
+   ```
+   *(Atau jalankan via perintah langsung: `pm2 start main_bot.py --name "fb-property-bot" --interpreter ./venv/bin/python`)*
+
+3. **Perintah Harian PM2**:
+   - Cek status bot: `pm2 status`
+   - Lihat log real-time: `pm2 logs fb-property-bot`
+   - Restart bot: `pm2 restart fb-property-bot`
+   - Stop bot: `pm2 stop fb-property-bot`
+   - Simpan proses agar otomatis hidup saat server reboot: `pm2 save && pm2 startup`
+
+#### ⚡ METODE 2: Menggunakan Script Watchdog Background (`run_bot.sh`)
+Jika server Anda tidak memiliki PM2, gunakan script auto-restart [`run_bot.sh`](run_bot.sh) yang sudah disertakan:
+```bash
+chmod +x run_bot.sh
+nohup ./run_bot.sh > bot.log 2>&1 &
+
+# Pantau log aktivitas:
+tail -f bot.log
+
+# Matikan bot:
+pkill -f main_bot.py
+```
+
+#### 🖥️ METODE 3: Menggunakan Tmux (Interaktif)
+```bash
+sudo apt install -y tmux
+tmux new -s property-bot
+
+# Jalankan bot:
+cd ~/facebook-property-bot
+source venv/bin/activate
+python main_bot.py
+
+# Detach (keluar dari layar tanpa mematikan bot):
+# Tekan CTRL + B, lalu tekan D
+
+# Masuk kembali kapan saja:
+tmux attach -t property-bot
+```
+
+# Di dalam sesi tmux, jalankan bot
+cd ~/facebook-property-bot
+source venv/bin/activate
+python main_bot.py
+
+# Detach (keluar dari tampilan tanpa mematikan bot):
+# Tekan CTRL + B, lalu lepaskan dan tekan D.
+
+# Masuk kembali ke sesi tmux kapan saja:
+tmux attach -t property-bot
+```
+
+#### 🛡️ Opsi C: Menggunakan Systemd Service (Hanya jika Systemd Aktif di EC2)
+Jika instance EC2 Anda mendukung systemd standar:
+1. Buat service: `sudo nano /etc/systemd/system/property-bot.service`
+2. Masukkan konfigurasi:
+   ```ini
+   [Unit]
+   Description=Facebook Property AI Bot 24/7
+   After=network.target
+
+   [Service]
+   Type=simple
+   User=ubuntu
+   WorkingDirectory=/home/ubuntu/facebook-property-bot
+   ExecStart=/home/ubuntu/facebook-property-bot/venv/bin/python main_bot.py
+   Restart=always
+   RestartSec=15
+   Environment=PYTHONUNBUFFERED=1
+
+   [Install]
+   WantedBy=multi-user.target
+   ```
+3. Aktifkan:
+   ```bash
+   sudo systemctl daemon-reload
+   sudo systemctl enable property-bot
+   sudo systemctl start property-bot
+   sudo systemctl status property-bot
+   ```
 
 ---
 
